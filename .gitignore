@@ -1,0 +1,22 @@
+# Environment variables
+.env
+.env.local
+
+# Python
+.venv/
+venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Diorin MVP runtime data (per-call input + outputs + logs)
+customer.json
+call_results/
+logs/
+
+# IDE settings
+.vscode/
+.idea/
+.DS_Store

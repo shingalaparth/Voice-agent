@@ -9,13 +9,19 @@ The LLM-facing tools are:
     cancel_order(reason)          -> customer cancelled, capture the reason
     record_retention_successful() -> a retention attempt changed their mind
     save_callback_time(date, time) -> customer requested a callback at specific IST time
+    mark_do_not_call()            -> customer opted out, don't call again
+    mark_wrong_number()           -> wrong number reported
+    mark_escalation_requested(r)   -> customer wants human agent
     save_call_result()            -> persist the final result (call before ending)
+
+Possible final_status values:
+    CONFIRMED | CANCELLED | CALLBACK_SCHEDULED | FAILED | UNKNOWN
+    SILENT_NO_RESPONSE | CUSTOMER_HUNG_UP | WRONG_NUMBER | DO_NOT_CALL | ESCALATION_REQUESTED
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
-import asyncio
 
 from livekit import agents
 from livekit.agents import llm
@@ -165,7 +171,26 @@ class OrderTools:
             self.callback_time,
             self.customer.get("order_id"),
         )
-        return f"[ACTION_SUCCESS: CALLBACK_SAVED_FOR_{self.callback_date}_{self.callback_time}_IST]"
+        return "[ACTION_SUCCESS: MUST_CALL_SAVE_CALL_RESULT_NOW]"
+
+    @llm.function_tool(description="Call ONLY when the customer explicitly says 'don't call again', 'call mat karo', or 'remove my number'. Do NOT call for normal cancellations.")
+    async def mark_do_not_call(self) -> str:
+        self.status = "DO_NOT_CALL"
+        logger.info("Customer opted out — DO_NOT_CALL (%s).", self.customer.get("order_id"))
+        return "[ACTION_SUCCESS: END_CONVERSATION_NOW]"
+
+    @llm.function_tool(description="Call ONLY when the customer says this is the wrong number.")
+    async def mark_wrong_number(self) -> str:
+        self.status = "WRONG_NUMBER"
+        logger.info("Wrong number reported (%s).", self.customer.get("order_id"))
+        return "[ACTION_SUCCESS: END_CONVERSATION_NOW]"
+
+    @llm.function_tool(description="Call ONLY when the customer asks to speak to a human or manager. Do NOT call for normal order issues.")
+    async def mark_escalation_requested(self, reason: str = "") -> str:
+        self.status = "ESCALATION_REQUESTED"
+        self.cancel_reason = (reason or "").strip()[:200] or "Customer requested human agent"
+        logger.info("Escalation requested: %s (%s).", self.cancel_reason, self.customer.get("order_id"))
+        return "[ACTION_SUCCESS: END_CONVERSATION_NOW]"
 
     @llm.function_tool(description="Call this right before ending the call to save the final result.")
     async def save_call_result(self) -> str:

@@ -84,6 +84,17 @@ DEFAULT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "hi")
 
 
 # =========================================================================================
+# Silence / No-Response Handling
+# =========================================================================================
+SILENCE_REPROMPT_DELAY = float(os.getenv("SILENCE_REPROMPT_DELAY", "4.0"))   # seconds before re-prompt
+SILENCE_MAX_REPROMPTS = int(os.getenv("SILENCE_MAX_REPROMPTS", "2"))          # re-prompt N times before giving up
+# No silence logic runs during this window right after the greeting: STT is
+# warming up and the customer is usually still saying "Hello?". Prevents false
+# re-prompts that talk over the customer's first response.
+SILENCE_STARTUP_GRACE = float(os.getenv("SILENCE_STARTUP_GRACE", "5.0"))
+
+
+# =========================================================================================
 # Feature Flags
 # =========================================================================================
 # Set to "false" to disable saving conversation transcripts in the JSON result.

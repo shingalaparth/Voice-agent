@@ -72,11 +72,21 @@ async def entrypoint(ctx: agents.JobContext) -> None:
 
     # --- 2. Build tools, session, and assistant -------------------------------
     order_tools = OrderTools(customer, ctx)
+    call_answered_time: float | None = None
 
     # Guarantee the result is saved even if the customer hangs up mid-conversation
     # and the LLM never reaches save_call_result().
     async def _on_shutdown():
         try:
+            # Detect instant hangup (customer picked up and cut within a few seconds)
+            nonlocal call_answered_time
+            if (call_answered_time
+                    and order_tools.status == "UNKNOWN"
+                    and asyncio.get_event_loop().time() - call_answered_time
+                    < 3.0):
+                order_tools.status = "CUSTOMER_HUNG_UP"
+                logger.info("Customer hung up instantly. Marking CUSTOMER_HUNG_UP.")
+
             out_path = order_tools.persist()
             if out_path and config.ENABLE_GEMINI_ANALYSIS:
                 await analysis_service.analyze_call(Path(out_path))
@@ -106,7 +116,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         agent_instance = Agent(
             instructions=instructions,
             tools=llm.find_function_tools(order_tools),
-            min_endpointing_delay=0.5,
+            min_endpointing_delay=0.3,
         )
         order_tools.agent = agent_instance
 
@@ -150,6 +160,8 @@ async def entrypoint(ctx: agents.JobContext) -> None:
                 order_tools.cancel_reason = "Customer is busy (SIP 486)"
             elif "480: Temporarily Unavailable" in exc_str:
                 order_tools.cancel_reason = "Customer is unavailable (SIP 480)"
+            elif "402" in exc_str or "Payment Required" in exc_str:
+                order_tools.cancel_reason = "SIP 402: Payment Required (top up Vobiz account)"
             else:
                 order_tools.cancel_reason = f"SIP Error: {exc_str[:200]}"
                 
@@ -157,19 +169,98 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             return
 
         masked_phone = f"{phone_number[:4]}****{phone_number[-4:]}" if len(phone_number) > 8 else "****"
+        call_answered_time = asyncio.get_event_loop().time()
         logger.info("Call answered by %s — agent is now speaking.", masked_phone)
-        session.generate_reply(instructions=greeting)
-        
+
+        # --- Silence tracking state ---
+        silence_reprompt_count: int = 0
+
+        # Speak the greeting directly via TTS — uninterruptible so the customer's
+        # "Hello?" cannot cut off the introduction. After this finishes, normal
+        # interruption behavior resumes for the rest of the conversation.
+        session.say(greeting, allow_interruptions=False)
+        try:
+            await session.wait_for_idle()  # wait for greeting TTS to fully finish
+        except Exception:
+            pass
+
+        # --- Silence timer starts here (after greeting TTS finishes) ---
+        # last_user_activity: timestamp of the LAST moment we heard/saw the
+        # customer do anything (speech, partial transcript, VAD "speaking").
+        # We never compare a stale value: it is refreshed every poll iteration
+        # straight from the live session properties, AND on every Deepgram
+        # transcript event.
+        silence_started_at = asyncio.get_event_loop().time()  # greeting just ended
+        last_user_activity = silence_started_at  # grace: assume customer is about to speak
+
+        # Single source of truth for "customer made a sound": the transcript
+        # event fires on every Deepgram chunk (partial OR final). We don't even
+        # need to read the payload — the event itself = activity.
+        @session.on("user_input_transcribed")
+        def _on_user_transcribed(_ev) -> None:
+            nonlocal last_user_activity
+            last_user_activity = asyncio.get_event_loop().time()
+
         while ctx.room.isconnected():
-            await asyncio.sleep(1)
-            
-            # If the tool saved the result, wait for the AI to finish speaking its goodbye
+            await asyncio.sleep(0.5)
+            now = asyncio.get_event_loop().time()
+
+            # --- Refresh activity clock from live properties every tick ---
+            # session.user_state == "speaking"  → VAD detected customer voice
+            # session.agent_state in {"speaking","thinking"} → agent busy, don't re-prompt
+            user_speaking = session.user_state == "speaking"
+            agent_busy = session.agent_state in ("speaking", "thinking")
+            if user_speaking:
+                last_user_activity = now
+
+            # --- Already saved? fall through to disconnect ---
             if order_tools._saved:
+                pass
+            # --- Startup grace: STT warming up + customer says "Hello?" first ---
+            elif now - silence_started_at < config.SILENCE_STARTUP_GRACE:
+                pass
+            # --- Agent busy (own TTS or LLM thinking)? never talk over it ---
+            elif agent_busy:
+                last_user_activity = now  # defer: reset so we don't fire the instant agent stops
+            # --- Customer just spoke? keep clock fresh, no re-prompt ---
+            elif user_speaking or now - last_user_activity <= config.SILENCE_REPROMPT_DELAY:
+                pass
+            # --- Real silence: re-prompt (within quota) ---
+            elif silence_reprompt_count < config.SILENCE_MAX_REPROMPTS:
+                silence_reprompt_count += 1
+                logger.info(
+                    "Silence detected (%.1fs), re-prompting (%d/%d).",
+                    now - last_user_activity,
+                    silence_reprompt_count,
+                    config.SILENCE_MAX_REPROMPTS,
+                )
+                session.say("Aap sun rahe hain? Main Diorin se bol rahi hoon.")
                 try:
-                    await session.wait_for_idle()  # wait until TTS finishes the goodbye
+                    await session.wait_for_idle()  # wait for re-prompt TTS to finish
                 except Exception:
                     pass
-                await asyncio.sleep(2)  # small buffer after audio ends
+                last_user_activity = asyncio.get_event_loop().time()
+                continue
+
+            # --- Silence detection: exhausted re-prompts, hang up ---
+            if (silence_reprompt_count >= config.SILENCE_MAX_REPROMPTS
+                    and not order_tools._saved
+                    and not user_speaking
+                    and not agent_busy
+                    and now - last_user_activity > config.SILENCE_REPROMPT_DELAY):
+                logger.info("Customer silent after %d re-prompts. Ending call.", silence_reprompt_count)
+                order_tools.status = "SILENT_NO_RESPONSE"
+                order_tools.persist()  # sets _saved = True, falls through to disconnect
+                session.say("Theek hai, main baad mein call karungi. Diorin ki taraf se dhanyavaad.")
+                continue
+
+            # --- Auto-disconnect after save ---
+            if order_tools._saved:
+                try:
+                    await session.wait_for_idle()
+                except Exception:
+                    pass
+                await asyncio.sleep(2)
                 logger.info("Explicitly kicking SIP customer before room disconnect.")
                 try:
                     for p in list(ctx.room.remote_participants.values()):
@@ -188,7 +279,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
                     await ctx.room.disconnect()
                 except Exception:
                     pass
-                await asyncio.sleep(0.5)  # flush buffer before context teardown to prevent Rust panics
+                await asyncio.sleep(0.5)
                 break
         
     except Exception as exc:

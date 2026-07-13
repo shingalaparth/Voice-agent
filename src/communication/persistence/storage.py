@@ -1,10 +1,12 @@
-"""Local JSON storage for the Diorin MVP.
+"""Local JSON storage for the communication platform.
 
 Two responsibilities:
   * load_customer()  - read the manually-edited customer.json (the call input).
   * save_result()    - write the final call outcome to call_results/*.json.
 
-No database, ORM, or SQL. Pure filesystem JSON for the MVP.
+No database, ORM, or SQL. Pure filesystem JSON for the MVP. Paths come from
+config.py (single source of truth) so swapping storage later only touches this
+folder.
 """
 from __future__ import annotations
 
@@ -15,11 +17,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from logger import logger
+from communication.config import config
+from communication.logging.logger import logger
 
-BASE_DIR = Path(__file__).resolve().parent
-CUSTOMER_FILE = BASE_DIR / "customer.json"
-RESULTS_DIR = BASE_DIR / "call_results"
+# Paths owned by config.py — no duplicates here.
+CUSTOMER_FILE = config.CUSTOMER_FILE
+RESULTS_DIR = config.RESULTS_DIR
 
 # Required keys for a customer record. Optional keys are ignored during validation.
 REQUIRED_FIELDS = ("name", "phone", "order_id", "product", "amount")

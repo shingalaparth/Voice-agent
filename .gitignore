@@ -11,10 +11,8 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Diorin MVP runtime data (per-call input + outputs + logs)
-customer.json
-call_results/
-logs/
+# Runtime data (per-call input + outputs + logs) — never commit customer PII
+data/
 
 # IDE settings
 .vscode/

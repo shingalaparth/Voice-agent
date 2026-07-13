@@ -9,8 +9,8 @@ import tenacity
 from google import genai
 from google.genai import types
 
-import config
-from logger import logger
+from communication.config import config
+from communication.logging.logger import logger
 
 
 class CallAnalysis(TypedDict):

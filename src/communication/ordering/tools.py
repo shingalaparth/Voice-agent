@@ -26,9 +26,9 @@ from typing import Any
 from livekit import agents
 from livekit.agents import llm
 
-from logger import logger
-from storage import save_result
-import config
+from communication.logging.logger import logger
+from communication.persistence.storage import save_result
+from communication.config import config
 
 
 class OrderTools:
@@ -51,12 +51,14 @@ class OrderTools:
         self.callback_time: str | None = None   # 12-hour AM/PM (IST)
 
         # Transcript tracking
-        self.schema_version: int = 1
+        self.schema_version: int = 2
         self.transcript: list[dict[str, str]] = []
 
     # ------------------------------------------------------------------ helpers
     def _result_dict(self) -> dict[str, Any]:
         result = {
+            "call_id": self.customer.get("call_id"),
+            "request_id": self.customer.get("request_id"),
             "order_id": self.customer.get("order_id"),
             "customer_name": self.customer.get("name"),
             "phone_number": self.customer.get("phone"),

@@ -1,7 +1,7 @@
-"""Centralized logging for the Diorin voice agent.
+"""Centralized logging for the communication platform.
 
-Console + rotating file output under logs/. Import `logger` everywhere so the
-whole project shares one configured logger.
+Console + rotating file output under data/logs/. Import `logger` everywhere so
+the whole project shares one configured logger.
 """
 from __future__ import annotations
 
@@ -11,8 +11,11 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 # Resolve paths relative to this file so it works from any CWD.
-BASE_DIR = Path(__file__).resolve().parent
-LOG_DIR = BASE_DIR / "logs"
+# logger/ → communication/ → src/ → <repo root>. Runtime logs live in <repo>/data/logs/.
+# NOTE: logger is the lowest layer — it must NOT import config (config imports logger).
+# Both compute the same path via parents[3], so LOG_DIR stays in sync with config.LOG_DIR.
+BASE_DIR = Path(__file__).resolve().parents[3]
+LOG_DIR = BASE_DIR / "data" / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 _LOG_FORMAT = "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
@@ -21,7 +24,7 @@ _DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 def _build_logger() -> logging.Logger:
     """Configure and return the root project logger."""
-    log = logging.getLogger("diorin-agent")
+    log = logging.getLogger("communication-agent")
     log.setLevel(logging.INFO)
     log.propagate = False  # avoid duplicate lines if root logger also emits
 

@@ -10,18 +10,31 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from logger import logger
+from communication.logging.logger import logger
 
 load_dotenv()
 
-BASE_DIR = Path(__file__).resolve().parent
+# Repo root: config/ → communication/ → src/ → <repo root>.
+# Runtime data (customer.json, call_results/, logs/) lives in <repo>/data/.
+BASE_DIR = Path(__file__).resolve().parents[3]
 
 # =========================================================================================
-# Paths
+# API & Webhook Configuration
 # =========================================================================================
-CUSTOMER_FILE = BASE_DIR / "customer.json"
-RESULTS_DIR = BASE_DIR / "call_results"
-LOG_DIR = BASE_DIR / "logs"
+API_KEY = os.getenv("API_KEY", "default_secret_key")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "default_webhook_secret")
+API_HOST = os.getenv("API_HOST", "0.0.0.0")
+API_PORT = int(os.getenv("API_PORT", "8080"))
+WEBHOOK_TIMEOUT_SECONDS = float(os.getenv("WEBHOOK_TIMEOUT_SECONDS", "10"))
+WEBHOOK_MAX_RETRIES = int(os.getenv("WEBHOOK_MAX_RETRIES", "3"))
+
+# =========================================================================================
+# Paths  (single source of truth — logger.py and storage.py import from here)
+# =========================================================================================
+DATA_DIR = BASE_DIR / "data"
+CUSTOMER_FILE = DATA_DIR / "customer.json"
+RESULTS_DIR = DATA_DIR / "call_results"
+LOG_DIR = DATA_DIR / "logs"
 
 
 # =========================================================================================
@@ -103,12 +116,12 @@ ENABLE_TRANSCRIPTION = os.getenv("ENABLE_TRANSCRIPTION", "true").lower() == "tru
 ENABLE_GEMINI_ANALYSIS = os.getenv("ENABLE_GEMINI_ANALYSIS", "true").lower() == "true"
 
 
-def validate_env() -> None:
-    """Fail fast at startup if a required credential is missing.
-
-    Logs each missing variable so the operator can fix .env in one pass.
+def _required_env() -> dict[str, str]:
+    """Single source of truth for required credentials, shared by validate_env()
+    (raising, used at worker startup) and missing_required_env() (non-raising,
+    used by GET /health).
     """
-    required = {
+    return {
         "LIVEKIT_URL": LIVEKIT_URL,
         "LIVEKIT_API_KEY": LIVEKIT_API_KEY,
         "LIVEKIT_API_SECRET": LIVEKIT_API_SECRET,
@@ -117,7 +130,19 @@ def validate_env() -> None:
         "ELEVEN_API_KEY": ELEVEN_API_KEY,
         "VOBIZ_SIP_TRUNK_ID": SIP_TRUNK_ID,
     }
-    missing = [name for name, value in required.items() if not value]
+
+
+def missing_required_env() -> list[str]:
+    """Non-raising check for /health: names of required env vars that are unset."""
+    return [name for name, value in _required_env().items() if not value]
+
+
+def validate_env() -> None:
+    """Fail fast at startup if a required credential is missing.
+
+    Logs each missing variable so the operator can fix .env in one pass.
+    """
+    missing = missing_required_env()
     if missing:
         msg = (
             "Missing required environment variables: "
@@ -126,6 +151,17 @@ def validate_env() -> None:
         )
         logger.error(msg)
         raise RuntimeError(msg)
+
+    if API_KEY == "default_secret_key":
+        logger.warning(
+            "API_KEY is still the default placeholder. Set a real API_KEY in "
+            ".env before exposing the API port publicly."
+        )
+    if WEBHOOK_SECRET == "default_webhook_secret":
+        logger.warning(
+            "WEBHOOK_SECRET is still the default placeholder. Set a real "
+            "WEBHOOK_SECRET in .env so webhook signatures can't be forged."
+        )
 
     logger.info(
         "Env OK. STT=%s/%s TTS=elevenlabs/%s LLM=groq/%s Trunk=%s",

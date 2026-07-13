@@ -51,14 +51,19 @@
 ---
 
 # 5. Repository Structure
-* **`agent.py`**: The core AI agent logic. Handles the LiveKit connection, voice agent initialization, and event callbacks (like agent speech, user speech, and call disconnection).
-* **`config.py`**: Centralized configuration management. Loads all environment variables and API keys (LiveKit, ElevenLabs, Groq, Gemini) required for the system.
-* **`prompts.py`**: Stores the system prompts and behavioral instructions that guide the Groq LLM on how to converse with the customer.
+* **`agent.py`**: The core AI agent logic. Handles the LiveKit connection, voice agent initialization, and event callbacks (like agent speech, user speech, and call disconnection). Also triggers webhook delivery from its shutdown callback.
+* **`config.py`**: Centralized configuration management. Loads all environment variables and API keys (LiveKit, ElevenLabs, Groq, Gemini, API/webhook) required for the system. `validate_env()` (raising) and `missing_required_env()` (non-raising, used by `/health`) share one source of truth.
+* **`prompts.py`**: Stores the system prompts and behavioral instructions that guide the Groq LLM on how to converse with the customer. Accepts an optional extra-context block from the API's `prompt` field.
 * **`tools.py`**: Contains callable tool functions (e.g., `mark_confirmed`, `cancel_order`) that the agent LLM can trigger during the conversation to signal business intent.
 * **`storage.py`**: Handles all file I/O operations. Responsible for reading initial customer data and saving the final JSON payload including transcripts and outcomes.
 * **`analysis_service.py`**: A decoupled, asynchronous background service that reads saved call transcripts, sends them to Gemini for structured analysis, and updates the JSON file.
 * **`logger.py`**: Configures customized, structured logging to help track the system state and debug issues across the pipeline.
-* **`make_call.py`**: The entrypoint script used to dispatch an outbound SIP call using the LiveKit Cloud API.
+* **`make_call.py`**: CLI entrypoint that dispatches an outbound call from `customer.json`, via `dispatch.py`.
+* **`main.py`**: FastAPI app exposing the stateless HTTP API — `POST /v1/calls` (dispatches a call, returns immediately) and `GET /health`.
+* **`dispatch.py`**: Shared LiveKit dispatch logic (room naming, job metadata, `CreateAgentDispatchRequest`) used by both `main.py` and `make_call.py`.
+* **`auth.py`**: Bearer API-key dependency for the HTTP API.
+* **`webhook.py`**: Signs and delivers the call result to the client's `callback_url` (HMAC-SHA256, retried), and maps the saved result JSON into the webhook payload shape.
+* **`schemas.py`**: Pydantic request/response models for the HTTP API.
 
 ---
 
@@ -99,6 +104,8 @@ Larger structural refactoring (like domain-driven modules) is intentionally defe
 
 ### In Progress
 * Hardening error boundaries (especially around API rate limits and async loop closures).
+
+* Stateless HTTP API (`POST /v1/calls`, `GET /health`) for triggering calls from external systems, with signed webhook delivery of the result. Local `call_results/*.json` persistence is kept as an operator-only safety net, never exposed via the API.
 
 ### Planned
 * Dashboard integration for viewing call results.

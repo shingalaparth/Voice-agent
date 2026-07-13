@@ -1,12 +1,17 @@
 # Diorin AI Calling Agent (MVP)
 
-A focused voice agent that calls **one customer at a time** to verify a Cash on
-Delivery (COD) order, conducts the conversation in **Hindi** (with English +
-Hinglish support), captures the final outcome, and saves it locally as JSON.
+A focused voice agent that calls a customer to verify a Cash on Delivery (COD)
+order, conducts the conversation in **Hindi** (with English + Hinglish
+support), captures the final outcome, and reports it back.
 
 Built on the existing LiveKit + Deepgram + Groq + ElevenLabs + Vobiz SIP stack.
-No database, dashboard, auth, or webhook — pure proof that the end-to-end voice
-workflow works for one manually-entered customer.
+Two ways to trigger a call:
+- **CLI** — edit `customer.json`, run `python make_call.py` (manual, one call
+  at a time, no HTTP involved).
+- **HTTP API** — `POST /v1/calls` (see §12). Stateless: the API returns
+  immediately and the result is delivered later via a signed webhook. No
+  database — `call_results/*.json` is kept only as a local operator safety
+  net, not exposed by any endpoint.
 
 ---
 
@@ -14,7 +19,12 @@ workflow works for one manually-entered customer.
 
 ```
 LIvekitAIVoice/
-├── agent.py              # LiveKit worker: build session, dial, run, save
+├── agent.py              # LiveKit worker: build session, dial, run, save, webhook
+├── main.py               # FastAPI app: POST /v1/calls, GET /health
+├── dispatch.py           # Shared LiveKit dispatch logic (main.py + make_call.py)
+├── auth.py               # Bearer API-key dependency for the HTTP API
+├── webhook.py            # Signed webhook delivery + payload shaping
+├── schemas.py            # Pydantic request/response models for the API
 ├── make_call.py          # CLI: load customer.json → dispatch the agent
 ├── customer.json         # INPUT — the one customer to call (you edit this)
 ├── customer.example.json # blank template to copy from
@@ -26,24 +36,31 @@ LIvekitAIVoice/
 ├── requirements.txt
 ├── Dockerfile
 ├── docker-compose.yml
+├── start.sh              # Docker entrypoint: runs API + agent worker together
 ├── create_trunk.py       # one-off: create Vobiz SIP trunk
 ├── setup_trunk.py        # one-off: update trunk credentials
 ├── list_trunks.py        # one-off: list existing trunks
-├── call_results/         # OUTPUT — <timestamp>_<order_id>.json (auto-created)
+├── call_results/         # LOCAL SAFETY NET — <timestamp>_<order_id>.json (auto-created, not exposed via API)
 └── logs/                 # agent.log + rotated files (auto-created)
 ```
 
-**What each file does and why it exists** (only changed files noted in §5):
+**What each file does and why it exists**:
 
 | File | Role |
 |------|------|
-| `agent.py` | LiveKit worker entrypoint. Reads customer from job metadata, builds the STT/LLM/TTS session, dials the customer via SIP, drives the conversation, and guarantees a result save via a shutdown callback. |
-| `make_call.py` | Loads + validates `customer.json`, creates a unique room, dispatches the `outbound-caller` agent with the full customer record as metadata. |
-| `config.py` | All env vars, model choices, paths. `validate_env()` fails fast on missing credentials. |
-| `prompts.py` | All conversation prompts live here — Hindi/English/multi language-aware, with `{name}`, `{product}`, etc. injected from the customer record. |
+| `agent.py` | LiveKit worker entrypoint. Reads customer from job metadata, builds the STT/LLM/TTS session, dials the customer via SIP, drives the conversation, and guarantees a result save + webhook delivery via a shutdown callback. |
+| `main.py` | FastAPI app. `POST /v1/calls` validates the request, dispatches the agent via `dispatch.py`, and returns `{call_id, status}` immediately. `GET /health` reports whether required credentials are configured. |
+| `dispatch.py` | `dispatch_call()` — builds the room name + job metadata and calls the LiveKit dispatch API. Shared by `main.py` and `make_call.py` so there's one dispatch code path. |
+| `auth.py` | `verify_api_key` — FastAPI dependency checking `Authorization: Bearer <API_KEY>`. |
+| `webhook.py` | Signs and POSTs the call result to the caller's `callback_url` (HMAC-SHA256 in `X-Signature`, retried via `tenacity`). Maps the saved result JSON into the webhook payload shape. |
+| `schemas.py` | `CallRequest` / `CallAcceptedResponse` / `HealthResponse` Pydantic models for the HTTP API. |
+| `make_call.py` | CLI: loads + validates `customer.json`, calls `dispatch.dispatch_call()`, prints the result. |
+| `config.py` | All env vars, model choices, paths. `validate_env()` fails fast on missing credentials (worker startup); `missing_required_env()` is the non-raising version `GET /health` uses. |
+| `prompts.py` | All conversation prompts live here — Hindi/English/multi language-aware, with `{name}`, `{product}`, etc. injected from the customer record, plus an optional "additional context" block from the API's `prompt` field. |
 | `tools.py` | `OrderTools` — `confirm_order`, `cancel_order(reason)`, `record_retention_successful`, `save_call_result`. Tracks outcome state and persists to `call_results/`. |
 | `storage.py` | `load_customer()` validates `customer.json`; `save_result()` writes the final JSON. |
 | `logger.py` | One configured logger used across the project (console + rotating file). |
+| `start.sh` | Docker `CMD` — runs `python agent.py start` and `uvicorn main:app` side by side in one container. |
 | `create_trunk.py` / `setup_trunk.py` / `list_trunks.py` | Unchanged SIP-trunk utilities. Run once when configuring Vobiz. |
 
 ---
@@ -265,6 +282,12 @@ plus every error with `exc_info=True`.
 | `GROQ_MODEL` | no | `llama-3.3-70b-versatile` | Groq model |
 | `GROQ_TEMPERATURE` | no | `0.7` | LLM temperature |
 | `DEFAULT_LANGUAGE` | no | `hi` | Fallback if customer.json omits `language` |
+| `API_KEY` | recommended | `default_secret_key` | Bearer token required on `POST /v1/calls`. Set a real value before exposing the port. |
+| `WEBHOOK_SECRET` | recommended | `default_webhook_secret` | HMAC-SHA256 key used to sign the `X-Signature` header on outbound webhooks. |
+| `API_HOST` | no | `0.0.0.0` | Host `uvicorn` binds to. |
+| `API_PORT` | no | `8080` | Port `uvicorn` binds to. |
+| `WEBHOOK_TIMEOUT_SECONDS` | no | `10` | Per-attempt HTTP timeout when POSTing the webhook. |
+| `WEBHOOK_MAX_RETRIES` | no | `3` | Retry attempts (exponential backoff) for webhook delivery. |
 
 ---
 
@@ -290,7 +313,8 @@ plus every error with `exc_info=True`.
 - **No retry / scheduling** — a failed/no-answer call is logged and ends.
 - **No live transcript UI** — read logs / result JSON to see what happened.
 - **Hindi-first** — English/Hinglish handled, but other languages need new entries in `prompts.LANGUAGE_INSTRUCTIONS` and possibly a different STT language.
-- **No auth** on any endpoint (none exposed — agent is driven by the LiveKit worker only).
+- **API auth is a single shared key** — `API_KEY` is one bearer token for all callers, no per-client keys/scopes yet.
+- **No request dedup/idempotency** — being fully stateless, the API doesn't track `request_id`s, so retried requests dispatch a new call.
 
 ---
 
@@ -304,6 +328,92 @@ plus every error with `exc_info=True`.
 - **Observability**: ship logs to a log aggregator; add per-call trace IDs and success/funnel metrics (confirmation rate, retention success rate).
 - **Security**: never commit `.env`; rotate the keys currently checked into the repo; add LiveKit token signing boundaries if exposing any HTTP API.
 - **Testing**: add unit tests for `storage.py` validation + `prompts.py` rendering, and a mock-SIP integration test for `agent.py`.
+
+---
+
+## 12. API Usage (HTTP)
+
+The API is stateless: `POST /v1/calls` starts a call and returns immediately;
+the transcript/outcome is delivered later to your `callback_url` as a signed
+webhook. Nothing about the call is queryable afterward — there's no `GET
+/calls/{id}`.
+
+### Running it
+
+Two processes, one container (or two terminals locally):
+```bash
+python agent.py start &            # the call-executing worker
+uvicorn main:app --host 0.0.0.0 --port 8080   # the HTTP API
+```
+Or via Docker: `docker compose up` runs both through `start.sh`.
+
+### Start a call
+```bash
+curl -X POST http://localhost:8080/v1/calls \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "request_id": "ORDER_10293",
+    "customer_name": "Rahul Sharma",
+    "phone": "+919876543210",
+    "order_id": "DRN-100245",
+    "product": "Dior Sauvage EDP 100ml",
+    "amount": "₹8,500",
+    "callback_url": "https://client-domain.com/api/webhooks/voice",
+    "prompt": "Customer previously asked for delivery in the evening.",
+    "language": "hi"
+  }'
+```
+Response (`202 Accepted`):
+```json
+{ "call_id": "CALL_3F9A1B2C7D", "status": "accepted" }
+```
+`order_id`/`product`/`amount` are required — the agent's conversation script
+needs them. `prompt` is optional extra context appended to (not a
+replacement of) that script. `language` defaults to `DEFAULT_LANGUAGE`.
+
+### Health check
+```bash
+curl http://localhost:8080/health
+# {"status": "ok", "missing": []}                    -- 200
+# {"status": "degraded", "missing": ["GROQ_API_KEY"]} -- 503
+```
+
+### Webhook payload
+
+Once the call ends (any outcome — confirmed, cancelled, no-answer, SIP
+failure, etc.), the worker POSTs this to `callback_url`:
+```json
+{
+  "request_id": "ORDER_10293",
+  "call_id": "CALL_3F9A1B2C7D",
+  "call_status": "completed",
+  "customer_response": "confirmed",
+  "summary": "Customer confirmed the order.",
+  "transcript": "Agent: ...\nCustomer: ...",
+  "call_duration": 148
+}
+```
+`call_status` is `"completed"` unless the call itself failed to connect
+(`"failed"`). `customer_response` reflects the agent's tool outcome
+(`confirmed`, `cancelled`, `callback_scheduled`, `no_response`, `hung_up`,
+`wrong_number`, `do_not_call`, `escalation_requested`, `unknown`). `summary`
+is populated by Gemini analysis if `ENABLE_GEMINI_ANALYSIS=true`, else empty.
+
+Delivery is retried (`WEBHOOK_MAX_RETRIES`, exponential backoff) and signed:
+```
+X-Signature: <hex hmac-sha256 of the raw JSON body, keyed with WEBHOOK_SECRET>
+```
+Verify it before trusting the payload, e.g. in Python:
+```python
+import hmac, hashlib
+expected = hmac.new(WEBHOOK_SECRET.encode(), request.body, hashlib.sha256).hexdigest()
+hmac.compare_digest(expected, request.headers["X-Signature"])
+```
+
+### Interactive docs
+FastAPI auto-generates Swagger UI at `/docs` and the OpenAPI spec at
+`/openapi.json` — no extra setup needed.
 
 ---
 

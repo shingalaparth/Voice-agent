@@ -1,0 +1,14 @@
+services:
+  voice-agent:
+    # Build context is the repo root so the Dockerfile can COPY src/ and
+    # requirements.txt. The Dockerfile itself lives in operations/docker/.
+    build:
+      context: ../..
+      dockerfile: operations/docker/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../../.env
+    # No source bind-mount: the image is self-contained (code is baked in via
+    # COPY in the Dockerfile) so `docker compose up` on a client's server runs
+    # exactly what was built, not whatever happens to be in the host folder.
+    network_mode: host # Recommended for WebRTC/Voice low latency (Linux host only)

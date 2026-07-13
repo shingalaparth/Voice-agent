@@ -21,11 +21,12 @@ from livekit import agents, api
 from livekit.agents import Agent, AgentSession, RoomInputOptions, llm
 from livekit.plugins import deepgram, elevenlabs, openai
 
-import config
-from logger import logger
-from prompts import build_greeting, build_system_prompt
-from tools import OrderTools
-import analysis_service
+from communication.config import config
+from communication.logging.logger import logger
+from communication.calling.prompts import build_greeting, build_system_prompt
+from communication.ordering.tools import OrderTools
+from communication.providers.analysis.gemini import analysis_service
+from communication.notifications import webhook
 
 
 
@@ -90,6 +91,9 @@ async def entrypoint(ctx: agents.JobContext) -> None:
             out_path = order_tools.persist()
             if out_path and config.ENABLE_GEMINI_ANALYSIS:
                 await analysis_service.analyze_call(Path(out_path))
+            callback_url = customer.get("callback_url")
+            if out_path and callback_url:
+                await webhook.deliver(Path(out_path), callback_url)
         except Exception as exc:
             logger.error("Error in shutdown callback: %s", exc, exc_info=True)
 
